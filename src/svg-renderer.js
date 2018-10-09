@@ -1,5 +1,6 @@
 const {createSVGElement, inlineSvgFonts} = require('./font-inliner');
 const convertFonts = require('./font-converter');
+const log = require('./util/log');
 
 /**
  * Main quirks-mode SVG rendering code.
@@ -34,18 +35,28 @@ class SvgRenderer {
      * @param {Function} [onFinish] Optional callback for when drawing finished.
      */
     fromString (svgString, scale, onFinish) {
-        this.loadString(svgString);
-        this._draw(scale, onFinish);
+        this.loadString(svgString).then(() => {
+            this._draw(scale, onFinish);
+        }, errorMessage => {
+            log.error(errorMessage);
+        });
     }
 
     /**
      * Load an SVG from a string and measure it.
      * @param {string} svgString String of SVG data to draw in quirks-mode.
-     * @return {object} the natural size, in Scratch units, of this SVG.
+     * @return {Promise} promise which resolves to measurements: the natural size, in Scratch units, of this SVG.
      */
     measure (svgString) {
-        this.loadString(svgString);
-        return this._measurements;
+        // TODO figure out if we cna get rid of this function, it's only used by say bubbles which we have a lot of
+        // control over ths SVG for
+        return new Promise((resolve, reject) => {
+            this.loadString(svgString).then(() => {
+                resolve(this._measurements);
+            }, errorMessage => {
+                reject(errorMessage);
+            });
+        });
     }
 
     /**
@@ -67,6 +78,7 @@ class SvgRenderer {
      * @param {!string} svgString String of SVG data to draw in quirks-mode.
      * @param {?boolean} fromVersion2 True if we should perform conversion from
      *     version 2 to version 3 svg.
+     * @return {?Promise} - a promise which will resolve after string is loaded, or reject with error
      */
     loadString (svgString, fromVersion2) {
         // New svg string invalidates the cached image
@@ -78,29 +90,40 @@ class SvgRenderer {
             svgString = svgString.replace('<svg ', '<svg xmlns="http://www.w3.org/2000/svg" ');
         }
 
-        // Parse string into SVG XML.
-        const parser = new DOMParser();
-        this._svgDom = parser.parseFromString(svgString, 'text/xml');
-        if (this._svgDom.childNodes.length < 1 ||
-            this._svgDom.documentElement.localName !== 'svg') {
-            throw new Error('Document does not appear to be SVG.');
-        }
-        this._svgTag = this._svgDom.documentElement;
-        if (fromVersion2) {
-            // Transform all text elements.
-            this._transformText();
-            // Transform measurements.
-            this._transformMeasurements();
-        } else if (!this._svgTag.getAttribute('viewBox')) {
-            // Renderer expects a view box.
-            this._transformMeasurements();
-        }
-        this._measurements = {
-            width: this._svgTag.viewBox.baseVal.width,
-            height: this._svgTag.viewBox.baseVal.height,
-            x: this._svgTag.viewBox.baseVal.x,
-            y: this._svgTag.viewBox.baseVal.y
-        };
+        return new Promise((resolve, reject) => {
+            // Parse string into SVG XML.
+            const parser = new DOMParser();
+            this._svgDom = parser.parseFromString(svgString, 'text/xml');
+
+            if (this._svgDom.childNodes.length < 1 ||
+                this._svgDom.documentElement.localName !== 'svg') {
+                reject('Document does not appear to be SVG.');
+            }
+            this._svgTag = this._svgDom.documentElement;
+            if (fromVersion2) {
+                // Transform all text elements.
+                this._transformText();
+                // Transform measurements.
+                this._transformMeasurements().then(() => {
+                    this._setMeasurementsFromViewbox();
+                    resolve();
+                }, () => {
+                    reject('SVG was malformed');
+                });
+            } else if (this._svgTag.getAttribute && this._svgTag.getAttribute('viewBox')) {
+                this._setMeasurementsFromViewbox();
+                resolve();
+            } else {
+                // TODO use width height
+                // Renderer expects a view box.
+                this._transformMeasurements().then(() => {
+                    this._setMeasurementsFromViewbox();
+                    resolve();
+                }, () => {
+                    reject('SVG was malformed');
+                });
+            }
+        });
     }
 
     /**
@@ -228,6 +251,72 @@ class SvgRenderer {
         return largestStrokeWidth;
     }
 
+    // Return a promise that resolves to the bounding box measurements of the current _svgTag, or rejects
+    // if getBBox fails on the element.
+    _getMeasurements () {
+        // TODO only perform transform measurements on 2.0 projects, add viewbox to 3.0 projects differently
+        // Save `svgText` for later re-parsing.
+        const svgText = this.toString();
+
+        // Append the SVG dom to the document.
+        // This allows us to use `getBBox` on the page,
+        // which returns the full bounding-box of all drawn SVG
+        // elements, similar to how Scratch 2.0 did measurement.
+        const svgSpot = document.createElement('span');
+        //svgSpot.setAttribute('style', 'z-index:1000000; top:0px; position:absolute;');
+
+        return new Promise((resolve, reject) => {
+            const getBBox = () => {
+                let bbox;
+                try {
+                    if (this._svgTag.getBBox) bbox = this._svgTag.getBBox();
+                } finally {
+                    // Always destroy the element, even if, for example, getBBox throws.
+                    document.body.removeChild(svgSpot);
+
+                    // Re-parse the SVG from `svgText`. The above DOM becomes
+                    // unusable/undrawable in browsers once it's appended to the page,
+                    // perhaps for security reasons?
+                    const parser = new DOMParser();
+                    this._svgDom = parser.parseFromString(svgText, 'text/xml');
+                    this._svgTag = this._svgDom.documentElement;
+                }
+                if (bbox) resolve(bbox);
+                reject('Couldn\'t getBBox');
+            };
+
+            document.body.appendChild(svgSpot);
+            svgSpot.appendChild(this._svgTag);
+            if (document.readyState === 'complete') {
+                getBBox();
+            } else {
+                document.onreadystatechange = () => {
+                    if (document.readyState !== 'complete') return;
+
+                    document.onreadystatechange = null;
+                    getBBox();
+                };
+            }
+        });
+    }
+
+    _setViewbox (bbox) {
+        // Enlarge the bbox from the largest found stroke width
+        // This may have false-positives, but at least the bbox will always
+        // contain the full graphic including strokes.
+        const halfStrokeWidth = this._findLargestStrokeWidth(this._svgTag) / 2;
+        const width = bbox.width + (halfStrokeWidth * 2);
+        const height = bbox.height + (halfStrokeWidth * 2);
+        const x = bbox.x - halfStrokeWidth;
+        const y = bbox.y - halfStrokeWidth;
+
+        // Set the correct measurements on the SVG tag
+        this._svgTag.setAttribute('width', width);
+        this._svgTag.setAttribute('height', height);
+        this._svgTag.setAttribute('viewBox',
+            `${x} ${y} ${width} ${height}`);
+    }
+
     /**
      * Transform the measurements of the SVG.
      * In Scratch 2.0, SVGs are drawn without respect to the width,
@@ -243,46 +332,24 @@ class SvgRenderer {
      * a natural and performant way.
      */
     _transformMeasurements () {
-        // Save `svgText` for later re-parsing.
-        const svgText = this.toString();
+        return new Promise((resolve, reject) => {
+            this._getMeasurements().then(bbox => {
+                this._setViewbox(bbox);
+                resolve();
+            }, () => {
+                // TODO try to use width height here?
+                reject();
+            });
+        });
+    }
 
-        // Append the SVG dom to the document.
-        // This allows us to use `getBBox` on the page,
-        // which returns the full bounding-box of all drawn SVG
-        // elements, similar to how Scratch 2.0 did measurement.
-        const svgSpot = document.createElement('span');
-        let bbox;
-        try {
-            document.body.appendChild(svgSpot);
-            svgSpot.appendChild(this._svgTag);
-            // Take the bounding box.
-            bbox = this._svgTag.getBBox();
-        } finally {
-            // Always destroy the element, even if, for example, getBBox throws.
-            document.body.removeChild(svgSpot);
-        }
-
-        // Re-parse the SVG from `svgText`. The above DOM becomes
-        // unusable/undrawable in browsers once it's appended to the page,
-        // perhaps for security reasons?
-        const parser = new DOMParser();
-        this._svgDom = parser.parseFromString(svgText, 'text/xml');
-        this._svgTag = this._svgDom.documentElement;
-
-        // Enlarge the bbox from the largest found stroke width
-        // This may have false-positives, but at least the bbox will always
-        // contain the full graphic including strokes.
-        const halfStrokeWidth = this._findLargestStrokeWidth(this._svgTag) / 2;
-        const width = bbox.width + (halfStrokeWidth * 2);
-        const height = bbox.height + (halfStrokeWidth * 2);
-        const x = bbox.x - halfStrokeWidth;
-        const y = bbox.y - halfStrokeWidth;
-
-        // Set the correct measurements on the SVG tag
-        this._svgTag.setAttribute('width', width);
-        this._svgTag.setAttribute('height', height);
-        this._svgTag.setAttribute('viewBox',
-            `${x} ${y} ${width} ${height}`);
+    _setMeasurementsFromViewbox () {
+        this._measurements = {
+            width: this._svgTag.viewBox.baseVal.width,
+            height: this._svgTag.viewBox.baseVal.height,
+            x: this._svgTag.viewBox.baseVal.x,
+            y: this._svgTag.viewBox.baseVal.y
+        };
     }
 
     /**
@@ -333,6 +400,7 @@ class SvgRenderer {
             };
             const svgText = this.toString(true /* shouldInjectFonts */);
             img.src = `data:image/svg+xml;utf8,${encodeURIComponent(svgText)}`;
+            //document.body.appendChild(img);
         }
     }
 
@@ -358,6 +426,7 @@ class SvgRenderer {
         this._canvas.style.height = bbox.height;
         // All finished - call the callback if provided.
         if (onFinish) {
+            //document.body.appendChild(this._canvas);
             onFinish();
         }
     }
