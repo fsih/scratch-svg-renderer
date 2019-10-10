@@ -70,8 +70,10 @@ class SvgRenderer {
      * @param {!string} svgString String of SVG data to draw in quirks-mode.
      * @param {?boolean} fromVersion2 True if we should perform conversion from
      *     version 2 to version 3 svg.
+     * @param {?boolean} fitToArtBoard True if the SVG should be resized to fit in
+     *     the size of the stage
      */
-    loadString (svgString, fromVersion2) {
+    loadString (svgString, fromVersion2, fitToArtboard) {
         // New svg string invalidates the cached image
         this._cachedImage = null;
 
@@ -105,9 +107,23 @@ class SvgRenderer {
             this._svgTag.setAttribute('width', this._svgTag.viewBox.baseVal.width);
             this._svgTag.setAttribute('height', this._svgTag.viewBox.baseVal.height);
         }
+        let width = this._svgTag.viewBox.baseVal.width;
+        let height = this._svgTag.viewBox.baseVal.height;
+        let scale = 1;
+        if (fitToArtboard) {
+            const SVG_ART_BOARD_WIDTH = 480;
+            const SVG_ART_BOARD_HEIGHT = 360;
+            if (width > SVG_ART_BOARD_WIDTH || height > SVG_ART_BOARD_HEIGHT) {
+                scale = Math.min(SVG_ART_BOARD_WIDTH / width, SVG_ART_BOARD_HEIGHT / height);
+                //this._svgTag.viewBox.baseVal.width *= scale;
+                //this._svgTag.viewBox.baseVal.height *= scale;
+                this._svgTag.setAttribute('scale', scale);
+                debugger;
+            }
+        }
         this._measurements = {
-            width: this._svgTag.viewBox.baseVal.width,
-            height: this._svgTag.viewBox.baseVal.height,
+            width: this._svgTag.viewBox.baseVal.width * scale,
+            height: this._svgTag.viewBox.baseVal.height * scale,
             x: this._svgTag.viewBox.baseVal.x,
             y: this._svgTag.viewBox.baseVal.y
         };
