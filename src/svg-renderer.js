@@ -118,17 +118,17 @@ class SvgRenderer {
                 if (scale !== 1) {
                     const centerX = width / 2;
                     const centerY = height / 2;
-                    const transformString = `translate(${-centerX},${-centerY}) scale(${scale}) translate(${centerX},${centerY})`;
+                    //const transformString = ``;
+                    const transformString = `scale(${scale})`;
+                    //const transformString = `translate(${-centerX},${-centerY}) scale(${scale}) translate(${centerX},${centerY})`;
                     const previousTransform = this._svgTag.getAttribute('transform');
                     if (previousTransform) {
                         transformString = `${previousTransform} ${transformString}`;
                     }
-                    //this._svgTag.setAttribute('transform', transformString);
+                    this._svgTag.setAttribute('transform', transformString);
                 }
-                //this._svgTag.viewBox.baseVal.width *= scale;
-                //this._svgTag.viewBox.baseVal.height *= scale;
-                //this._svgTag.setAttribute('scale', scale);
-                console.log(this._svgTag);
+                this._svgTag.viewBox.baseVal.width *= scale;
+                this._svgTag.viewBox.baseVal.height *= scale;
             }
         }
         this._measurements = {
